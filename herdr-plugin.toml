@@ -1,0 +1,40 @@
+id = "boat"
+name = "herdr-boat-sandbox"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Send a git worktree, uncommitted changes and all, to a boat.dev sandbox and drop into its shell. Pull the sandbox's changes back as a patch; the sandbox is stopped when the worktree is removed."
+platforms = ["macos", "linux"]
+
+[[events]]
+on = "worktree.removed"
+command = ["node", "src/boat.mjs", "teardown"]
+
+[[actions]]
+id = "open"
+title = "Open boat sandbox"
+contexts = ["workspace", "pane"]
+command = ["node", "src/boat.mjs", "open"]
+
+[[actions]]
+id = "pull"
+title = "Pull boat sandbox → worktree"
+contexts = ["workspace", "pane"]
+command = ["node", "src/boat.mjs", "pull"]
+
+[[actions]]
+id = "status"
+title = "Boat sandbox status"
+contexts = ["workspace", "pane"]
+command = ["node", "src/boat.mjs", "status"]
+
+[[actions]]
+id = "stop"
+title = "Stop boat sandbox"
+contexts = ["workspace", "pane"]
+command = ["node", "src/boat.mjs", "stop"]
+
+[[panes]]
+id = "box"
+title = "boat"
+placement = "split"
+command = ["node", "src/boat.mjs", "box"]
