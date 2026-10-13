@@ -6,7 +6,7 @@ Needs herdr ≥ 0.9, Node ≥ 22, git, tar, and the [`boat` CLI](https://docs.bo
 
 ```sh
 curl -fsSL https://boat.dev/install | sh && boat login
-herdr plugin link "$PWD" --enabled
+herdr plugin install dmnkgrc/herdr-boat-sandbox   # or, from a clone: herdr plugin link "$PWD" --enabled
 ```
 
 ## Actions
