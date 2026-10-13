@@ -149,7 +149,10 @@ function cloneUrl(root) {
 export function sync(id, root) {
   const branch = branchOf(root);
   console.log(`Pushing ${branch} and checking it out in ${id}…`);
-  git(root, "push", "-q", "origin", branch);
+  const pushed = spawnSync("git", ["-C", root, "rev-parse", "-q", "--verify", `refs/remotes/origin/${branch}`], {
+    encoding: "utf8",
+  }).stdout.trim();
+  if (pushed !== git(root, "rev-parse", "HEAD")) git(root, "push", "-q", "origin", branch);
   remote(id, CHECKOUT, [cloneUrl(root), branch]);
   return dirty(root);
 }

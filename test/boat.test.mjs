@@ -92,6 +92,9 @@ test("open pushes the branch for the box to check out, and pull brings the box's
   commit(repo, "kept.txt", "a3");
   ensureSandbox(repo);
   assert.equal(read(project, "kept.txt"), "a3");
+
+  git(repo, "remote", "set-url", "--push", "origin", "/nonexistent");
+  ensureSandbox(repo);
 });
 
 test("open connects the box as a herdr machine and replaces it after a resume", () => {
