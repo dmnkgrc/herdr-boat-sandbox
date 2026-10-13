@@ -38,8 +38,8 @@ const read = (dir, file) => fs.readFileSync(path.join(dir, file), "utf8");
 
 function setup() {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "boat-test-")));
-  const [bin, home, repo, config] = ["bin", "home", "repo", "config"].map((name) =>
-    path.join(tmp, name),
+  const [bin, home, repo, config, origin] = ["bin", "home", "repo", "config", "origin.git"].map(
+    (name) => path.join(tmp, name),
   );
   for (const dir of [bin, home, repo, config]) fs.mkdirSync(dir);
   fs.writeFileSync(path.join(bin, "boat"), FAKE_BOAT, { mode: 0o755 });
@@ -52,44 +52,46 @@ function setup() {
   process.env.HERDR_PLUGIN_STATE_DIR = path.join(tmp, "state");
   process.env.HERDR_BIN_PATH = path.join(bin, "herdr");
   process.env.HERDR_PLUGIN_CONFIG_DIR = config;
-  git(repo, "init", "-q", "-b", "feature");
+  git(tmp, "init", "-q", "--bare", "-b", "main", origin);
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "remote", "add", "origin", origin);
+  write(repo, ".gitignore", "node_modules\n");
   write(repo, "kept.txt", "a");
   git(repo, "add", "-A");
   git(repo, "commit", "-qm", "init");
-  return { home, repo, config };
+  git(repo, "push", "-q", "origin", "main");
+  git(repo, "checkout", "-q", "-b", "feature");
+  return { home, repo, config, origin, project: path.join(home, "project") };
 }
 
 const open = (repo) =>
   spawnSync("node", [path.resolve("src/boat.mjs"), "box"], { cwd: repo, encoding: "utf8" });
 
-test("seeds the live worktree and pulls the sandbox's changes back", () => {
-  const { home, repo } = setup();
-  write(repo, ".gitignore", "secret\n*.log\n");
-  write(repo, "removed.txt", "b");
-  write(repo, "tracked.log", "t");
-  git(repo, "add", "-A");
-  git(repo, "add", "-f", "tracked.log");
-  git(repo, "commit", "-qm", "more");
-  write(repo, "kept.txt", "a2");
-  fs.rmSync(path.join(repo, "removed.txt"));
-  write(repo, "new.txt", "c");
-  write(repo, "secret", "x");
+const commit = (dir, file, text) => {
+  write(dir, file, text);
+  git(dir, "add", "-A");
+  git(dir, "commit", "-qm", file);
+};
 
-  ensureSandbox(repo);
-  const project = path.join(home, "project");
-  assert.equal(git(project, "status", "--porcelain"), git(repo, "status", "--porcelain"));
-  assert.equal(read(project, "kept.txt"), "a2");
-  assert.equal(fs.existsSync(path.join(project, "secret")), false);
-  assert.match(git(project, "ls-files"), /tracked\.log/);
+test("open pushes the branch for the box to check out, and pull brings the box's commits back", () => {
+  const { repo, project } = setup();
+  commit(repo, "kept.txt", "a2");
+  write(repo, "local.txt", "uncommitted");
 
-  write(project, "kept.txt", "a3");
-  write(project, "agent.txt", "d");
-  fs.rmSync(path.join(project, "new.txt"));
-  pull(repo);
-  assert.equal(read(repo, "kept.txt"), "a3");
+  assert.equal(ensureSandbox(repo).unpushed, 1);
+  assert.equal(git(project, "branch", "--show-current"), "feature\n");
+  assert.equal(git(project, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD"));
+  assert.equal(fs.existsSync(path.join(project, "local.txt")), false);
+
+  commit(project, "agent.txt", "d");
+  write(project, "scratch.txt", "uncommitted");
+  assert.equal(pull(repo), "Pulled feature from bx_test. 1 uncommitted changes stayed in the box.");
   assert.equal(read(repo, "agent.txt"), "d");
-  assert.equal(fs.existsSync(path.join(repo, "new.txt")), false);
-  assert.equal(pull(repo), "Nothing to pull.");
+  assert.equal(git(repo, "rev-parse", "HEAD"), git(project, "rev-parse", "HEAD"));
+
+  commit(repo, "kept.txt", "a3");
+  ensureSandbox(repo);
+  assert.equal(read(project, "kept.txt"), "a3");
 });
 
 test("open connects the box as a herdr machine and replaces it after a resume", () => {
@@ -108,28 +110,17 @@ test("open connects the box as a herdr machine and replaces it after a resume", 
   assert.match(read(home, "herdr.log"), /^machine remove m1\nmachine add --label boat repo boat-bx_test$/m);
 });
 
-test("a sandbox from a snapshot keeps its ignored files and drops the snapshot's tracked ones", () => {
-  const { home, repo } = setup();
-  write(repo, ".gitignore", "node_modules\n");
-  git(repo, "add", "-A");
-  git(repo, "commit", "-qm", "ignore");
-  const project = path.join(home, "project");
-  fs.mkdirSync(path.join(project, "node_modules"), { recursive: true });
-  write(project, ".gitignore", "node_modules\n");
+test("a box from a snapshot keeps its clone's ignored files when it switches branch", () => {
+  const { repo, origin, project } = setup();
+  git(path.dirname(project), "clone", "-q", origin, project);
+  fs.mkdirSync(path.join(project, "node_modules"));
   write(project, "node_modules/dep.js", "dep");
-  write(project, "stale.txt", "old");
-  git(project, "init", "-q");
-  git(project, "add", "-A");
-  git(project, "commit", "-qm", "snapshot");
-  write(project, "junk.txt", "untracked");
+  commit(repo, "feature.txt", "f");
 
   ensureSandbox(repo);
+  assert.equal(git(project, "branch", "--show-current"), "feature\n");
+  assert.equal(read(project, "feature.txt"), "f");
   assert.equal(read(project, "node_modules/dep.js"), "dep");
-  assert.equal(fs.existsSync(path.join(project, "stale.txt")), false);
-  assert.equal(fs.existsSync(path.join(project, "junk.txt")), false);
-  assert.equal(git(project, "log", "--format=%s"), "herdr-boat: feature @ " + git(repo, "rev-parse", "--short", "HEAD"));
-  assert.equal(git(project, "status", "--porcelain"), "");
-  assert.equal(git(project, "ls-files"), ".gitignore\nkept.txt\n");
 });
 
 test("repo settings override shared ones, ttl defaults to four hours, and .agents/resume runs", () => {

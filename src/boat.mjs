@@ -7,50 +7,29 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-const PRELUDE = `set -eo pipefail
-export GIT_AUTHOR_NAME=herdr-boat GIT_AUTHOR_EMAIL=herdr-boat@localhost
-export GIT_COMMITTER_NAME=herdr-boat GIT_COMMITTER_EMAIL=herdr-boat@localhost
-snapshot() {
-  export GIT_INDEX_FILE=.git/herdr-boat-index
-  cp .git/index "$GIT_INDEX_FILE"
-  git add -A
-  git commit-tree "$(git write-tree)" -m herdr-boat
-}
+const GIT = `set -eo pipefail
+git() { command git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"; }
 `;
 
-const SEED = `${PRELUDE}
-branch=$1 sha=$2
-shift 2
-mkdir -p "$HOME/project"
+const CHECKOUT = `${GIT}
+url=$1 branch=$2
+[ -d "$HOME/project/.git" ] || git clone -q "$url" "$HOME/project"
 cd "$HOME/project"
-if [ -d .git ]; then
-  git clean -fdq
-  git ls-files -z | xargs -0 rm -rf --
-  rm -rf .git
+git fetch -q origin "$branch"
+if git show-ref -q --verify "refs/heads/$branch"; then
+  git checkout -q "$branch"
+  git merge -q --ff-only "origin/$branch"
+else
+  git checkout -q -b "$branch" --track "origin/$branch"
 fi
-git init -q -b "$branch"
-tar -x
-git add -A
-[ $# -eq 0 ] || git --literal-pathspecs add -f -- "$@"
-git commit -q --allow-empty -m "herdr-boat: $branch @ $sha"
 grep -qs herdr-boat "$HOME/.bashrc" || echo 'cd "$HOME/project" 2>/dev/null # herdr-boat' >> "$HOME/.bashrc"
 `;
 
-const overlayScript = (withTar) => `${PRELUDE}
+const PUSH = `${GIT}
 cd "$HOME/project"
-${withTar ? "tar -x" : ""}
-[ $# -eq 0 ] || rm -f -- "$@"
-git update-ref refs/herdr/pulled "$(snapshot)"
+git push -q origin "$1"
+git status --porcelain | wc -l
 `;
-
-const PULL = `${PRELUDE}
-cd "$HOME/project"
-commit=$(snapshot)
-git update-ref refs/herdr/pending "$commit"
-git diff --binary refs/herdr/pulled "$commit"
-`;
-
-const ACK = `cd "$HOME/project" && git update-ref refs/herdr/pulled refs/herdr/pending`;
 
 const RESUME = `cd "$HOME/project" && if [ -x .agents/resume ]; then .agents/resume; fi`;
 
@@ -86,17 +65,6 @@ function jsonError(stdout) {
 
 const remote = (id, script, args = [], options = {}) =>
   run("boat", ["ssh", id, "--", "bash", "-c", script, "bash", ...args], options);
-
-function remoteFrom(file, id, script, args) {
-  const fd = fs.openSync(file, "r");
-  try {
-    return remote(id, script, args, { stdio: [fd, "pipe", "pipe"] });
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-const split = (output) => output.split("\0").filter(Boolean);
 
 function stateDir() {
   const dir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -162,39 +130,28 @@ function create(root) {
   return id;
 }
 
-export function upload(id, root) {
-  const git = (...args) => run("git", ["-C", root, ...args]);
-  if (spawnSync("git", ["-C", root, "rev-parse", "--verify", "-q", "HEAD"]).status !== 0)
-    throw new Error("The worktree has no commit yet; commit something first.");
-  const sha = git("rev-parse", "--short", "HEAD").trim();
-  const ref = git("rev-parse", "--abbrev-ref", "HEAD").trim();
-  const branch = ref === "HEAD" ? "herdr-boat" : ref;
-  const deleted = new Set(split(git("ls-files", "-z", "--deleted")));
-  const ignored = split(git("ls-files", "-z", "--cached", "--ignored", "--exclude-standard"));
-  // ponytail: tracked-but-ignored files go as args; ship them in the tar if a repo has thousands.
-  const forced = ignored.length
-    ? split(git("--literal-pathspecs", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ...ignored))
-    : [];
-  const changed = split(
-    git("ls-files", "-z", "--modified", "--others", "--exclude-standard"),
-  ).filter((file) => !deleted.has(file));
+const git = (root, ...args) => run("git", ["-C", root, ...args]).trim();
+const dirty = (root) => git(root, "status", "--porcelain").split("\n").filter(Boolean).length;
 
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-boat-"));
-  try {
-    const head = path.join(tmp, "head.tar");
-    git("archive", "--format=tar", "-o", head, "HEAD");
-    remoteFrom(head, id, SEED, [branch, sha, ...forced]);
-    if (!changed.length) return void remote(id, overlayScript(false), [...deleted]);
-    const overlay = path.join(tmp, "overlay.tar");
-    run("tar", ["-c", "--no-xattrs", "-f", overlay, "--null", "-T", "-"], {
-      cwd: root,
-      input: changed.join("\0"),
-      env: { ...process.env, COPYFILE_DISABLE: "1" },
-    });
-    remoteFrom(overlay, id, overlayScript(true), [...deleted]);
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
+function branchOf(root) {
+  const branch = git(root, "rev-parse", "--abbrev-ref", "HEAD");
+  if (branch === "HEAD") throw new Error("Check out a branch first; the box gets it through origin.");
+  return branch;
+}
+
+// ponytail: assumes SSH remotes, including host aliases like git@work-github:org/repo, are GitHub.
+function cloneUrl(root) {
+  const url = git(root, "remote", "get-url", "origin");
+  const slug = url.match(/^(?:[^/@]+@[^:/]+:|ssh:\/\/[^/]+\/)(.+?)(?:\.git)?$/)?.[1];
+  return slug ? `https://github.com/${slug}.git` : url;
+}
+
+export function sync(id, root) {
+  const branch = branchOf(root);
+  console.log(`Pushing ${branch} and checking it out in ${id}…`);
+  git(root, "push", "-q", "origin", branch);
+  remote(id, CHECKOUT, [cloneUrl(root), branch]);
+  return dirty(root);
 }
 
 export function ensureSandbox(root) {
@@ -209,7 +166,7 @@ export function ensureSandbox(root) {
   }
   if (!record) {
     console.log("Creating a boat sandbox…");
-    record = { sandboxId: create(root), worktreePath: root, seeded: false };
+    record = { sandboxId: create(root), worktreePath: root };
     writeRecord(file, record);
   } else if (RESUMABLE.includes(state)) {
     console.log(`Resuming ${record.sandboxId}…`);
@@ -217,19 +174,14 @@ export function ensureSandbox(root) {
   } else {
     started = false;
   }
-  if (!record.seeded) {
-    console.log(`Uploading the worktree to ${record.sandboxId}…`);
-    upload(record.sandboxId, root);
-    record.seeded = true;
-    writeRecord(file, record);
-  }
+  const unpushed = sync(record.sandboxId, root);
   if (started) {
     const resume = spawnSync("boat", ["ssh", record.sandboxId, "--", "bash", "-c", RESUME], {
       stdio: ["ignore", "inherit", "inherit"],
     });
     if (resume.status !== 0) console.error(".agents/resume failed; continuing.");
   }
-  return { ...record, started };
+  return { ...record, started, unpushed };
 }
 
 const herdr = (...args) => run(process.env.HERDR_BIN_PATH || "herdr", args);
@@ -292,21 +244,10 @@ function requireRecord(root) {
 
 export function pull(root) {
   const { sandboxId } = requireRecord(root);
-  const patch = remote(sandboxId, PULL, [], { encoding: "buffer" });
-  if (!patch.length) return "Nothing to pull.";
-  const file = path.join(stateDir(), "patches", `${sandboxId}-${Date.now()}.patch`);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, patch);
-  try {
-    run("git", ["-C", root, "apply", "--binary", file]);
-  } catch (error) {
-    throw new Error(
-      `${error.message}\nThe patch is kept at ${file}; apply it with git apply --3way.`,
-    );
-  }
-  remote(sandboxId, ACK);
-  fs.rmSync(file);
-  return `Pulled ${sandboxId} into ${path.basename(root)}.`;
+  const branch = branchOf(root);
+  const left = Number(remote(sandboxId, PUSH, [branch]).trim());
+  git(root, "pull", "-q", "--ff-only", "origin", branch);
+  return `Pulled ${branch} from ${sandboxId}.${left ? ` ${left} uncommitted changes stayed in the box.` : ""}`;
 }
 
 function status(root) {
@@ -372,10 +313,11 @@ function openPane(root, targetPane) {
 async function box() {
   try {
     const root = worktreeRoot(process.cwd());
-    const { sandboxId, started } = ensureSandbox(root);
+    const { sandboxId, started, unpushed } = ensureSandbox(root);
     console.log(`Connecting ${sandboxId} to herdr…`);
     const label = connect(sandboxId, root, started);
-    notify(`${sandboxId} is ready: select "${label}" in the sidebar.`);
+    const left = unpushed ? ` ${unpushed} uncommitted changes stayed in the local worktree.` : "";
+    notify(`${sandboxId} is ready: select "${label}" in the sidebar.${left}`);
   } catch (error) {
     console.error(error.message);
     process.stdout.write("Press Enter to close.");
@@ -384,7 +326,7 @@ async function box() {
   }
 }
 
-const worktreeRoot = (cwd) => run("git", ["-C", cwd, "rev-parse", "--show-toplevel"]).trim();
+const worktreeRoot = (cwd) => git(cwd, "rev-parse", "--show-toplevel");
 
 const ACTIONS = { pull, status, stop };
 

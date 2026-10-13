@@ -2,7 +2,7 @@ id = "boat"
 name = "herdr-boat-sandbox"
 version = "0.1.0"
 min_herdr_version = "0.9.0"
-description = "Send a git worktree, uncommitted changes and all, to a boat.dev sandbox and add it to herdr as a machine. Pull the sandbox's changes back as a patch; the sandbox is stopped when the worktree is removed."
+description = "Check a worktree's branch out in a boat.dev sandbox through origin and add it to herdr as a machine. Pull the sandbox's commits back; the sandbox is stopped when the worktree is removed."
 platforms = ["macos", "linux"]
 
 [[events]]
