@@ -8,6 +8,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const GIT = `set -eo pipefail
+export GIT_TERMINAL_PROMPT=0
 git() { command git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"; }
 `;
 
@@ -15,7 +16,8 @@ const CHECKOUT = `${GIT}
 url=$1 branch=$2
 [ -d "$HOME/project/.git" ] || git clone -q "$url" "$HOME/project"
 cd "$HOME/project"
-git fetch -q origin "$branch"
+# Boat's fresh GitHub token is rejected for a few seconds after the box starts.
+for i in 1 2 3 4 5 6; do git fetch -q origin "$branch" && break; [ $i = 6 ] && exit 1; sleep 5; done
 if git show-ref -q --verify "refs/heads/$branch"; then
   git checkout -q "$branch"
   git merge -q --ff-only "origin/$branch"
